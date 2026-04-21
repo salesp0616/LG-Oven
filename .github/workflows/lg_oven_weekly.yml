@@ -3,7 +3,7 @@ name: LG Oven Weekly Update
 on:
   workflow_dispatch:
   schedule:
-    - cron: '0 7 * * 1'
+    - cron: '30 23 * * *'
 
 jobs:
   update-lg-oven-market:
