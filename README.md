@@ -13,7 +13,7 @@
 5. 시트 ID를 `SHEET_ID` Secret에 저장
 6. GitHub Actions 활성화
 7. `LG Oven Weekly Update` 워크플로 수동 1회 실행
-8. 이후 매주 월요일 16:00 KST 자동 실행
+8. 이후 매일 08:00 KST 자동 실행
 
 ## 시트 구조
 - `List`: 주간 Top 1~5 누적
