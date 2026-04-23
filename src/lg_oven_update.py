@@ -16,6 +16,8 @@ SCOPES = [
     "https://www.googleapis.com/auth/drive",
 ]
 
+DATE_RE = re.compile(r"^\d{4}\.\d{2}\.\d{2}$")
+
 
 def dedupe_keep_order(seq):
     seen = set()
@@ -31,20 +33,32 @@ def to_money_str(value):
     if value in (None, ""):
         return ""
     try:
-        return f"{float(value):.2f}"
+        return f"{float(str(value).replace(',', '')):.2f}"
     except Exception:
         return ""
+
+
+def to_float(value):
+    try:
+        return float(str(value).replace(",", "").replace("%", ""))
+    except Exception:
+        return None
 
 
 def calc_promo_pct(list_price, promo_amount):
-    try:
-        lp = float(list_price)
-        pa = float(promo_amount)
-        if lp <= 0:
-            return ""
-        return f"{(pa / lp) * 100:.2f}%"
-    except Exception:
+    lp = to_float(list_price)
+    pa = to_float(promo_amount)
+    if lp is None or pa is None or lp == 0:
         return ""
+    return f"{(pa / lp) * 100:.2f}%"
+
+
+def calc_wow(prev_total, curr_total):
+    p = to_float(prev_total)
+    c = to_float(curr_total)
+    if p is None or c is None or p == 0:
+        return ""
+    return f"{((c - p) / p) * 100:.2f}%"
 
 
 def extract_pdp_links(page):
@@ -68,72 +82,108 @@ def extract_pn_from_url(url: str) -> str:
     return slug.split("-")[0].upper()
 
 
-def extract_product_name(body_text: str, pn: str) -> str:
-    lines = [x.strip() for x in body_text.splitlines() if x.strip()]
+def extract_product_name(page, pn: str) -> str:
+    # 1순위: 상세페이지 h1
+    try:
+        h1 = page.locator("h1").first.inner_text(timeout=5000).strip()
+        if h1 and len(h1) >= 10:
+            return h1
+    except Exception:
+        pass
 
-    # P/N이 있는 줄은 제외
-    clean_lines = []
-    for line in lines:
-        if pn and pn.upper() in line.upper():
-            continue
-        if "$" in line:
-            continue
-        if "OFF" in line.upper():
-            continue
-        if line.lower() in {
-            "add to cart", "compare", "learn more", "find a dealer",
-            "sold exclusively through authorized lg retail partners.",
-        }:
-            continue
-        clean_lines.append(line)
+    # 2순위: 메타 타이틀
+    try:
+        title = page.locator('meta[property="og:title"]').first.get_attribute("content")
+        if title:
+            title = title.strip()
+            if len(title) >= 10:
+                return title
+    except Exception:
+        pass
 
-    # 가장 긴 설명형 문장을 제품명으로 사용
-    for line in clean_lines:
-        if len(line) >= 15:
-            return line
+    # 3순위: 페이지 본문에서 pn 포함 안 된 긴 문장 중 첫 번째
+    try:
+        body_text = page.locator("body").inner_text(timeout=10000)
+        lines = [x.strip() for x in body_text.splitlines() if x.strip()]
+        banned = {
+            "compare",
+            "learn more",
+            "find a dealer",
+            "add to cart",
+            "shop now",
+        }
+        for line in lines:
+            low = line.lower()
+            if any(b in low for b in banned):
+                continue
+            if "$" in line:
+                continue
+            if pn and pn.upper() in line.upper():
+                continue
+            if len(line) >= 15:
+                return line
+    except Exception:
+        pass
 
     return pn
 
 
 def extract_prices(body_text: str, html: str):
-    # visible text 기준
+    # 목표:
+    # Price($) = 정상가(list/original)
+    # Promotion($) = 할인액
+    # Total($) = 할인 후가(current/sale)
     current_price = ""
     promo_amount = ""
     list_price = ""
 
-    # "$900.00 OFF" 패턴
+    # 할인액
     off_match = re.search(r"\$([\d,]+(?:\.\d{2})?)\s+OFF", body_text, re.I)
     if off_match:
         promo_amount = off_match.group(1).replace(",", "")
 
-    # 모든 가격 후보
-    text_prices = re.findall(r"\$([\d,]+(?:\.\d{2})?)", body_text)
-    text_prices = [p.replace(",", "") for p in text_prices]
+    # visible text 가격 후보
+    visible_prices = re.findall(r"\$([\d,]+(?:\.\d{2})?)", body_text)
+    visible_prices = [p.replace(",", "") for p in visible_prices]
 
-    # JSON/HTML price fallback
-    html_prices = re.findall(r'"price"\s*:\s*"?(?P<v>\d+(?:\.\d{2})?)"?', html, re.I)
-    html_prices += re.findall(r'"salePrice"\s*:\s*"?(?P<v>\d+(?:\.\d{2})?)"?', html, re.I)
-    html_prices += re.findall(r'"currentPrice"\s*:\s*"?(?P<v>\d+(?:\.\d{2})?)"?', html, re.I)
+    # html/json 가격 후보
+    sale_price = ""
+    current_price_json = ""
+    generic_price = ""
 
-    candidates = text_prices + html_prices
+    patterns = [
+        (r'"salePrice"\s*:\s*"?(?P<v>\d+(?:\.\d{2})?)"?', "sale"),
+        (r'"currentPrice"\s*:\s*"?(?P<v>\d+(?:\.\d{2})?)"?', "current"),
+        (r'"price"\s*:\s*"?(?P<v>\d+(?:\.\d{2})?)"?', "price"),
+    ]
+    for pat, kind in patterns:
+        m = re.search(pat, html, re.I)
+        if m:
+            if kind == "sale":
+                sale_price = m.group("v")
+            elif kind == "current":
+                current_price_json = m.group("v")
+            elif kind == "price":
+                generic_price = m.group("v")
 
-    # 현재가 추정: 첫 번째 합리적 가격
-    for price in candidates:
-        try:
-            if float(price) > 0:
-                current_price = price
-                break
-        except Exception:
-            pass
+    # 현재가 우선순위
+    if sale_price:
+        current_price = sale_price
+    elif current_price_json:
+        current_price = current_price_json
+    elif visible_prices:
+        current_price = visible_prices[0]
+    elif generic_price:
+        current_price = generic_price
 
     # 정상가 추정
-    if current_price and promo_amount:
+    if promo_amount and current_price:
         try:
             list_price = f"{float(current_price) + float(promo_amount):.2f}"
         except Exception:
             list_price = ""
 
-    # OFF 뒤에 정상가가 직접 보이는 경우 우선
+    # OFF 뒤에 정상가가 바로 표기되면 우선 사용
     off_list_match = re.search(r"OFF\s*\$([\d,]+(?:\.\d{2})?)", body_text, re.I)
     if off_list_match:
         list_price = off_list_match.group(1).replace(",", "")
@@ -144,9 +194,9 @@ def extract_prices(body_text: str, html: str):
         promo_amount = ""
 
     return {
-        "current_price": to_money_str(current_price),   # 할인 후가
-        "promo_amount": to_money_str(promo_amount),     # 할인액
-        "list_price": to_money_str(list_price),         # 정상가
+        "current_price": to_money_str(current_price),  # 할인 후가
+        "promo_amount": to_money_str(promo_amount),    # 할인액
+        "list_price": to_money_str(list_price),        # 정상가
     }
 
 
@@ -161,7 +211,7 @@ def parse_product_page(page, url):
     html = page.content()
 
     pn = extract_pn_from_url(url)
-    model = extract_product_name(body_text, pn)
+    model = extract_product_name(page, pn)
     prices = extract_prices(body_text, html)
 
     if not pn or not prices["current_price"]:
@@ -171,11 +221,10 @@ def parse_product_page(page, url):
         "url": url,
         "pn": pn,
         "model": model,
-        # 시트 의미에 맞춤
         "price": prices["list_price"],         # Price($) = 정상가
         "promotion": prices["promo_amount"],   # Promotion($) = 할인액
-        "total": prices["current_price"],      # Total($) = 할인 후가
         "promotion_pct": calc_promo_pct(prices["list_price"], prices["promo_amount"]),
+        "total": prices["current_price"],      # Total($) = 할인 후가
     }
 
 
@@ -185,6 +234,7 @@ def scrape_top5():
         page = browser.new_page(
             user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
         )
+
         page.goto(SEARCH_URL, wait_until="domcontentloaded", timeout=120000)
         page.wait_for_timeout(5000)
 
@@ -214,25 +264,97 @@ def get_client():
     return gspread.authorize(creds)
 
 
+def get_existing_valid_rows(sheet):
+    all_values = sheet.get_all_values()
+    rows = []
+
+    # 실제 시트 행번호를 유지하기 위해 enumerate 사용
+    for idx, row in enumerate(all_values, start=1):
+        if len(row) < 11:
+            row += [""] * (11 - len(row))
+
+        date_val = row[0].strip() if len(row) > 0 else ""
+        rank_val = row[1].strip() if len(row) > 1 else ""
+
+        if DATE_RE.match(date_val) and rank_val.isdigit():
+            rows.append({
+                "sheet_row": idx,
+                "date": row[0],
+                "rank": row[1],
+                "knob": row[2],
+                "model": row[3],
+                "pn": row[4],
+                "price": row[5],
+                "promotion": row[6],
+                "promotion_pct": row[7],
+                "total": row[8],
+                "wow": row[9],
+                "note": row[10],
+            })
+
+    return rows
+
+
+def delete_existing_today_rows(sheet, today):
+    existing = get_existing_valid_rows(sheet)
+    target_row_numbers = [r["sheet_row"] for r in existing if r["date"] == today]
+
+    # 아래에서부터 지워야 인덱스 안 꼬임
+    for row_num in sorted(target_row_numbers, reverse=True):
+        sheet.delete_rows(row_num)
+
+
+def get_previous_snapshot(sheet, today):
+    existing = get_existing_valid_rows(sheet)
+    dates = sorted({r["date"] for r in existing if r["date"] != today})
+    if not dates:
+        return []
+
+    prev_date = dates[-1]
+    prev_rows = [r for r in existing if r["date"] == prev_date]
+    prev_rows.sort(key=lambda x: int(x["rank"]))
+    return prev_rows
+
+
+def build_note(prev_by_pn, pn, current_rank):
+    prev = prev_by_pn.get(pn)
+    if not prev:
+        return ""
+    prev_rank = int(prev["rank"])
+    if prev_rank == current_rank:
+        return "SAME"
+    return "Ranking change"
+
+
 def write_to_list(rows):
     client = get_client()
     sheet = client.open_by_key(SHEET_ID).worksheet("List")
     today = datetime.now().strftime("%Y.%m.%d")
 
+    # 오늘 잘못 들어간 중복 데이터 방지
+    delete_existing_today_rows(sheet, today)
+
+    prev_rows = get_previous_snapshot(sheet, today)
+    prev_by_pn = {r["pn"]: r for r in prev_rows if r["pn"]}
+
     values = []
     for i, r in enumerate(rows, start=1):
+        prev = prev_by_pn.get(r["pn"], {})
+        wow = calc_wow(prev.get("total", ""), r["total"])
+        note = build_note(prev_by_pn, r["pn"], i)
+
         values.append([
             today,               # Date
             i,                   # Rank
             "",                  # Knob O/X
             r["model"],          # Model
             r["pn"],             # P/N
-            r["price"],          # Price($) = 정상가
-            r["promotion"],      # Promotion($) = 할인액
+            r["price"],          # Price($)
+            r["promotion"],      # Promotion($)
             r["promotion_pct"],  # Promotion(%)
-            r["total"],          # Total($) = 할인 후가
-            "",                  # WOW
-            "",                  # Note
+            r["total"],          # Total($)
+            wow,                 # WOW
+            note,                # Note
         ])
 
     if not values:
