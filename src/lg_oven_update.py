@@ -17,6 +17,14 @@ SCOPES = [
 ]
 
 DATE_RE = re.compile(r"^\d{4}\.\d{2}\.\d{2}$")
+BANNED_MODEL_TEXT = {
+    "skip to main content",
+    "compare",
+    "learn more",
+    "shop now",
+    "find a dealer",
+    "add to cart",
+}
 
 
 def dedupe_keep_order(seq):
@@ -29,26 +37,24 @@ def dedupe_keep_order(seq):
     return out
 
 
-def to_money_str(value):
-    if value in (None, ""):
-        return ""
-    try:
-        return f"{float(str(value).replace(',', '')):.2f}"
-    except Exception:
-        return ""
-
-
 def to_float(value):
     try:
-        return float(str(value).replace(",", "").replace("%", ""))
+        return float(str(value).replace(",", "").replace("$", "").replace("%", "").strip())
     except Exception:
         return None
+
+
+def to_money_str(value):
+    f = to_float(value)
+    if f is None:
+        return ""
+    return f"{f:.2f}"
 
 
 def calc_promo_pct(list_price, promo_amount):
     lp = to_float(list_price)
     pa = to_float(promo_amount)
-    if lp is None or pa is None or lp == 0:
+    if lp is None or pa is None or lp <= 0:
         return ""
     return f"{(pa / lp) * 100:.2f}%"
 
@@ -59,6 +65,25 @@ def calc_wow(prev_total, curr_total):
     if p is None or c is None or p == 0:
         return ""
     return f"{((c - p) / p) * 100:.2f}%"
+
+
+def infer_knob(model: str, pn: str) -> str:
+    m = (model or "").lower()
+    p = (pn or "").upper()
+
+    # 1순위: 모델명 기준
+    if "wall oven" in m:
+        return "X"
+    if "range" in m:
+        return "O"
+
+    # 2순위: P/N prefix 기준
+    if p.startswith(("WSEP", "WCEP", "WDEP", "WCES", "WDES")):
+        return "X"
+    if p.startswith(("LDG", "LRE", "LSE", "LTE", "LSEL", "LRGL", "LREL")):
+        return "O"
+
+    return ""
 
 
 def extract_pdp_links(page):
@@ -82,149 +107,168 @@ def extract_pn_from_url(url: str) -> str:
     return slug.split("-")[0].upper()
 
 
-def extract_product_name(page, pn: str) -> str:
-    # 1순위: 상세페이지 h1
-    try:
-        h1 = page.locator("h1").first.inner_text(timeout=5000).strip()
-        if h1 and len(h1) >= 10:
-            return h1
-    except Exception:
-        pass
-
-    # 2순위: 메타 타이틀
-    try:
-        title = page.locator('meta[property="og:title"]').first.get_attribute("content")
-        if title:
-            title = title.strip()
-            if len(title) >= 10:
-                return title
-    except Exception:
-        pass
-
-    # 3순위: 페이지 본문에서 pn 포함 안 된 긴 문장 중 첫 번째
-    try:
-        body_text = page.locator("body").inner_text(timeout=10000)
-        lines = [x.strip() for x in body_text.splitlines() if x.strip()]
-        banned = {
-            "compare",
-            "learn more",
-            "find a dealer",
-            "add to cart",
-            "shop now",
-        }
-        for line in lines:
-            low = line.lower()
-            if any(b in low for b in banned):
-                continue
-            if "$" in line:
-                continue
-            if pn and pn.upper() in line.upper():
-                continue
-            if len(line) >= 15:
-                return line
-    except Exception:
-        pass
-
-    return pn
+def iter_json_objects(obj):
+    if isinstance(obj, dict):
+        yield obj
+        for v in obj.values():
+            yield from iter_json_objects(v)
+    elif isinstance(obj, list):
+        for item in obj:
+            yield from iter_json_objects(item)
 
 
-def extract_prices(body_text: str, html: str):
-    # 목표:
-    # Price($) = 정상가(list/original)
-    # Promotion($) = 할인액
-    # Total($) = 할인 후가(current/sale)
-    current_price = ""
-    promo_amount = ""
-    list_price = ""
+def extract_jsonld_products(html: str):
+    scripts = re.findall(
+        r'<script[^>]*type="application/ld\+json"[^>]*>(.*?)</script>',
+        html,
+        re.I | re.S,
+    )
 
-    # 할인액
-    off_match = re.search(r"\$([\d,]+(?:\.\d{2})?)\s+OFF", body_text, re.I)
-    if off_match:
-        promo_amount = off_match.group(1).replace(",", "")
-
-    # visible text 가격 후보
-    visible_prices = re.findall(r"\$([\d,]+(?:\.\d{2})?)", body_text)
-    visible_prices = [p.replace(",", "") for p in visible_prices]
-
-    # html/json 가격 후보
-    sale_price = ""
-    current_price_json = ""
-    generic_price = ""
-
-    patterns = [
-        (r'"salePrice"\s*:\s*"?(?P<v>\d+(?:\.\d{2})?)"?', "sale"),
-        (r'"currentPrice"\s*:\s*"?(?P<v>\d+(?:\.\d{2})?)"?', "current"),
-        (r'"price"\s*:\s*"?(?P<v>\d+(?:\.\d{2})?)"?', "price"),
-    ]
-    for pat, kind in patterns:
-        m = re.search(pat, html, re.I)
-        if m:
-            if kind == "sale":
-                sale_price = m.group("v")
-            elif kind == "current":
-                current_price_json = m.group("v")
-            elif kind == "price":
-                generic_price = m.group("v")
-
-    # 현재가 우선순위
-    if sale_price:
-        current_price = sale_price
-    elif current_price_json:
-        current_price = current_price_json
-    elif visible_prices:
-        current_price = visible_prices[0]
-    elif generic_price:
-        current_price = generic_price
-
-    # 정상가 추정
-    if promo_amount and current_price:
+    products = []
+    for raw in scripts:
+        raw = raw.strip()
+        if not raw:
+            continue
         try:
-            list_price = f"{float(current_price) + float(promo_amount):.2f}"
+            data = json.loads(raw)
         except Exception:
-            list_price = ""
+            continue
 
-    # OFF 뒤에 정상가가 바로 표기되면 우선 사용
-    off_list_match = re.search(r"OFF\s*\$([\d,]+(?:\.\d{2})?)", body_text, re.I)
-    if off_list_match:
-        list_price = off_list_match.group(1).replace(",", "")
+        for obj in iter_json_objects(data):
+            if not isinstance(obj, dict):
+                continue
+            if obj.get("@type") == "Product":
+                products.append(obj)
+    return products
 
-    # 할인 없는 경우
-    if current_price and not list_price:
-        list_price = current_price
-        promo_amount = ""
 
-    return {
-        "current_price": to_money_str(current_price),  # 할인 후가
-        "promo_amount": to_money_str(promo_amount),    # 할인액
-        "list_price": to_money_str(list_price),        # 정상가
-    }
+def choose_product_json(products, pn: str):
+    if not products:
+        return None
+
+    # 1순위: sku/mpn/model이 pn과 일치
+    for p in products:
+        candidates = [
+            str(p.get("sku", "")),
+            str(p.get("mpn", "")),
+            str(p.get("model", "")),
+        ]
+        if pn and any(c.upper() == pn.upper() for c in candidates if c):
+            return p
+
+    # 2순위: name에 pn이 포함
+    for p in products:
+        name = str(p.get("name", ""))
+        if pn and pn.upper() in name.upper():
+            return p
+
+    # 3순위: 첫 번째 Product
+    return products[0]
+
+
+def extract_price_from_offers(offers):
+    if isinstance(offers, dict):
+        for key in ["price", "salePrice", "currentPrice", "lowPrice", "highPrice"]:
+            if key in offers:
+                v = to_money_str(offers.get(key))
+                if v:
+                    return v
+    elif isinstance(offers, list):
+        for off in offers:
+            if isinstance(off, dict):
+                for key in ["price", "salePrice", "currentPrice", "lowPrice", "highPrice"]:
+                    if key in off:
+                        v = to_money_str(off.get(key))
+                        if v:
+                            return v
+    return ""
+
+
+def extract_off_amount(body_text: str):
+    m = re.search(r"\$([\d,]+(?:\.\d{2})?)\s+OFF", body_text, re.I)
+    if m:
+        return to_money_str(m.group(1))
+    return ""
+
+
+def extract_model_from_product_json(product, pn: str):
+    name = str(product.get("name", "")).strip()
+    if not name:
+        return ""
+
+    low = name.lower()
+    if low in BANNED_MODEL_TEXT:
+        return ""
+
+    if len(name) < 10:
+        return ""
+
+    # pn만 덩그러니 있으면 모델명으로 인정 안 함
+    if pn and name.upper() == pn.upper():
+        return ""
+
+    return name
 
 
 def parse_product_page(page, url):
     try:
         page.goto(url, wait_until="domcontentloaded", timeout=120000)
-        page.wait_for_timeout(3000)
+        page.wait_for_timeout(2500)
     except PlaywrightTimeoutError:
         return None
 
-    body_text = page.locator("body").inner_text(timeout=30000)
-    html = page.content()
-
     pn = extract_pn_from_url(url)
-    model = extract_product_name(page, pn)
-    prices = extract_prices(body_text, html)
+    html = page.content()
+    body_text = page.locator("body").inner_text(timeout=30000)
 
-    if not pn or not prices["current_price"]:
+    products = extract_jsonld_products(html)
+    product = choose_product_json(products, pn)
+
+    if not product:
         return None
+
+    model = extract_model_from_product_json(product, pn)
+    if not model:
+        return None
+
+    current_price = extract_price_from_offers(product.get("offers", {}))
+    promo_amount = extract_off_amount(body_text)
+
+    if not current_price:
+        return None
+
+    total_price = current_price  # 할인 후가
+    list_price = ""
+
+    if promo_amount:
+        cp = to_float(current_price)
+        pa = to_float(promo_amount)
+        if cp is not None and pa is not None:
+            list_price = f"{cp + pa:.2f}"
+
+    if not list_price:
+        list_price = current_price
+        promo_amount = ""
+
+    # 최종 검증
+    lp = to_float(list_price)
+    tp = to_float(total_price)
+    if lp is None or tp is None:
+        return None
+    if lp < 100 or tp < 100:
+        return None
+    if lp < tp:
+        # 혹시 뒤집혔으면 스왑
+        list_price, total_price = total_price, list_price
 
     return {
         "url": url,
         "pn": pn,
         "model": model,
-        "price": prices["list_price"],         # Price($) = 정상가
-        "promotion": prices["promo_amount"],   # Promotion($) = 할인액
-        "promotion_pct": calc_promo_pct(prices["list_price"], prices["promo_amount"]),
-        "total": prices["current_price"],      # Total($) = 할인 후가
+        "price": to_money_str(list_price),           # Price($) = 정상가
+        "promotion": to_money_str(promo_amount),     # Promotion($) = 할인액
+        "promotion_pct": calc_promo_pct(list_price, promo_amount),
+        "total": to_money_str(total_price),          # Total($) = 할인 후가
     }
 
 
@@ -242,7 +286,7 @@ def scrape_top5():
         print(f"[DEBUG] PDP links found: {len(links)}")
 
         results = []
-        for url in links[:12]:
+        for url in links[:15]:
             item = parse_product_page(page, url)
             if not item:
                 continue
@@ -251,6 +295,9 @@ def scrape_top5():
                 break
 
         browser.close()
+
+    if len(results) < 5:
+        raise RuntimeError(f"Only {len(results)} valid LG rows parsed.")
 
     print(f"[DEBUG] parsed rows: {results}")
     return results
@@ -268,7 +315,6 @@ def get_existing_valid_rows(sheet):
     all_values = sheet.get_all_values()
     rows = []
 
-    # 실제 시트 행번호를 유지하기 위해 enumerate 사용
     for idx, row in enumerate(all_values, start=1):
         if len(row) < 11:
             row += [""] * (11 - len(row))
@@ -297,10 +343,8 @@ def get_existing_valid_rows(sheet):
 
 def delete_existing_today_rows(sheet, today):
     existing = get_existing_valid_rows(sheet)
-    target_row_numbers = [r["sheet_row"] for r in existing if r["date"] == today]
-
-    # 아래에서부터 지워야 인덱스 안 꼬임
-    for row_num in sorted(target_row_numbers, reverse=True):
+    target_rows = [r["sheet_row"] for r in existing if r["date"] == today]
+    for row_num in sorted(target_rows, reverse=True):
         sheet.delete_rows(row_num)
 
 
@@ -309,7 +353,6 @@ def get_previous_snapshot(sheet, today):
     dates = sorted({r["date"] for r in existing if r["date"] != today})
     if not dates:
         return []
-
     prev_date = dates[-1]
     prev_rows = [r for r in existing if r["date"] == prev_date]
     prev_rows.sort(key=lambda x: int(x["rank"]))
@@ -331,7 +374,6 @@ def write_to_list(rows):
     sheet = client.open_by_key(SHEET_ID).worksheet("List")
     today = datetime.now().strftime("%Y.%m.%d")
 
-    # 오늘 잘못 들어간 중복 데이터 방지
     delete_existing_today_rows(sheet, today)
 
     prev_rows = get_previous_snapshot(sheet, today)
@@ -346,7 +388,7 @@ def write_to_list(rows):
         values.append([
             today,               # Date
             i,                   # Rank
-            "",                  # Knob O/X
+            infer_knob(r["model"], r["pn"]),  # Knob O/X
             r["model"],          # Model
             r["pn"],             # P/N
             r["price"],          # Price($)
