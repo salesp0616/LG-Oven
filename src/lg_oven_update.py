@@ -45,8 +45,12 @@ def scrape():
 
 def write(data):
     creds = Credentials.from_service_account_info(
-        json.loads(GOOGLE_SERVICE_ACCOUNT_JSON)
-    )
+    json.loads(GOOGLE_SERVICE_ACCOUNT_JSON),
+    scopes=[
+        "https://www.googleapis.com/auth/spreadsheets",
+        "https://www.googleapis.com/auth/drive"
+    ]
+)
     client = gspread.authorize(creds)
 
     sheet = client.open_by_key(SHEET_ID).worksheet("List")
