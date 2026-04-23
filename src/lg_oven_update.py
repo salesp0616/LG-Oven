@@ -13,52 +13,53 @@ URL = "https://www.lg.com/us/search?q=oven&tab=product"
 
 
 def scrape():
-    result = []
+    products = []
 
     with sync_playwright() as p:
         browser = p.chromium.launch(headless=True)
         page = browser.new_page(
-            user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
+            user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64)"
         )
 
         page.goto(URL, wait_until="domcontentloaded", timeout=120000)
         page.wait_for_timeout(8000)
 
-        items = page.locator('div[class*="product"]')
-        count = items.count()
+        cards = page.locator('a[href*="/us/"]')
+        count = cards.count()
 
-        print(f"[DEBUG] product count: {count}")
-
-        for i in range(min(5, count)):
+        for i in range(count):
             try:
-                txt = items.nth(i).inner_text()
-                lines = [line.strip() for line in txt.split("\n") if line.strip()]
+                text = cards.nth(i).inner_text()
 
-                model = lines[0] if len(lines) > 0 else ""
+                # 🔥 필터 (핵심)
+                if "Compare" in text:
+                    continue
+                if "$" not in text:
+                    continue
+
+                lines = [l.strip() for l in text.split("\n") if l.strip()]
+
+                model = ""
                 price = ""
 
                 for line in lines:
                     if "$" in line:
-                        price = (
-                            line.replace("$", "")
-                            .replace(",", "")
-                            .strip()
-                        )
-                        break
+                        price = line.replace("$", "").replace(",", "").strip()
+                    elif len(line) > 10 and "cu." in line:
+                        model = line
 
-                result.append(
-                    {
+                if model and price:
+                    products.append({
                         "model": model,
-                        "price": price,
-                    }
-                )
-            except Exception as e:
-                print(f"[DEBUG] parse error: {e}")
+                        "price": price
+                    })
+
+            except:
+                continue
 
         browser.close()
 
-    print(f"[DEBUG] scraped result: {result}")
-    return result
+    return products[:5]
 
 
 def write(data):
@@ -76,30 +77,20 @@ def write(data):
     today = datetime.now().strftime("%Y.%m.%d")
 
     rows = []
-    for i, d in enumerate(data, 1):
-        rows.append(
-            [
-                today,          # Date
-                i,              # Rank
-                "",             # Knob O/X
-                d["model"],     # Model
-                "",             # P/N
-                d["price"],     # Price($)
-                "",             # Promotion($)
-                "",             # Promotion(%)
-                "",             # Total($)
-                "",             # WOW
-                "",             # Note
-            ]
-        )
 
-    print(f"[DEBUG] rows to append: {rows}")
+    for i, d in enumerate(data, 1):
+        rows.append([
+            today,     # Date
+            i,         # Rank
+            "",        # Knob O/X (유지)
+            d["model"],
+            "",        # P/N
+            float(d["price"]),
+            "", "", "", "", ""
+        ])
 
     if rows:
         sheet.append_rows(rows, value_input_option="USER_ENTERED")
-        print("[SUCCESS] rows appended to List")
-    else:
-        print("[DEBUG] no rows to append")
 
 
 def main():
