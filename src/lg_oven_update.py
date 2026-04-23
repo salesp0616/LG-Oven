@@ -15,10 +15,12 @@ def scrape():
     result = []
 
     with sync_playwright() as p:
-        browser = p.chromium.launch(headless=True)
-        page = browser.new_page()
-        page.goto(URL, timeout=60000)
-        page.wait_for_timeout(6000)
+    browser = p.chromium.launch(headless=True)
+    page = browser.new_page(
+        user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
+    )
+    page.goto(URL, wait_until="domcontentloaded", timeout=120000)
+    page.wait_for_timeout(8000)
 
         items = page.locator('div[class*="product"]')
         count = items.count()
