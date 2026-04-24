@@ -189,7 +189,7 @@ def write_to_list(rows):
 
 
 def main():
-    rows = scrape_top5()
+    rows = scrape()
     write_to_list(rows)
 
 
