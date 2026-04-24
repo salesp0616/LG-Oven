@@ -188,10 +188,100 @@ def write_to_list(rows):
     print("[SUCCESS] rows appended to List")
 
 
-def main():
-    rows = scrape()
-    write_to_list(rows)
+def scrape_lg():
+    def clean_money(raw):
+        if not raw:
+            return ""
+        raw = raw.replace(",", "").replace("$", "").strip()
+        f = to_float(raw)
+        if f is None:
+            return ""
+        return f"{f:.2f}"
+
+    def parse_plp_text(body_text):
+        lines = [x.strip() for x in body_text.splitlines() if x.strip()]
+
+        found = []
+
+        for idx, line in enumerate(lines):
+            pn = line.strip().upper()
+
+            if pn not in MODEL_MAP:
+                continue
+
+            model = MODEL_MAP[pn]
+            segment = lines[idx: idx + 30]
+            segment_text = "\n".join(segment)
+
+            prices = re.findall(r"\$([\d,]+(?:\.\d{2})?)", segment_text)
+            prices = [clean_money(p) for p in prices]
+            prices = [p for p in prices if p and to_float(p) and to_float(p) >= 100]
+
+            off_match = re.search(r"\$([\d,]+(?:\.\d{2})?)\s+OFF", segment_text, re.I)
+            promotion = clean_money(off_match.group(1)) if off_match else ""
+
+            current_price = ""
+            list_price = ""
+
+            if prices:
+                current_price = prices[0]
+
+            if promotion and current_price:
+                cp = to_float(current_price)
+                pp = to_float(promotion)
+
+                if cp is not None and pp is not None:
+                    list_price = f"{cp + pp:.2f}"
+
+            if not list_price:
+                if len(prices) >= 2:
+                    list_price = prices[1]
+                elif current_price:
+                    list_price = current_price
+                    promotion = ""
+
+            if not current_price or not list_price:
+                continue
+
+            found.append({
+                "pn": pn,
+                "model": model,
+                "price": list_price,
+                "promotion": promotion,
+                "total": current_price,
+            })
+
+        seen = set()
+        out = []
+
+        for item in found:
+            if item["pn"] in seen:
+                continue
+
+            seen.add(item["pn"])
+            out.append(item)
+
+        return out[:5]
+
+    with sync_playwright() as p:
+        browser = p.chromium.launch(headless=True)
+
+        page = browser.new_page(
+            user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
+        )
+
+        page.goto(SEARCH_URL, wait_until="domcontentloaded", timeout=120000)
+        page.wait_for_timeout(7000)
+
+        body_text = page.locator("body").inner_text(timeout=30000)
+        rows = parse_plp_text(body_text)
+
+        browser.close()
+
+    if len(rows) < 5:
+        raise RuntimeError(f"Only {len(rows)} valid LG rows parsed.")
+
+    return rows
 
 
-if __name__ == "__main__":
     main()
