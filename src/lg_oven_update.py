@@ -381,22 +381,25 @@ def write_to_list(rows):
 
     values = []
     for i, r in enumerate(rows, start=1):
+        if not r.get("model") or not r.get("total"):
+            continue
+
         prev = prev_by_pn.get(r["pn"], {})
         wow = calc_wow(prev.get("total", ""), r["total"])
         note = build_note(prev_by_pn, r["pn"], i)
 
         values.append([
-            today,               # Date
-            i,                   # Rank
-            infer_knob(r["model"], r["pn"]),  # Knob O/X
-            r["model"],          # Model
-            r["pn"],             # P/N
-            r["price"],          # Price($)
-            r["promotion"],      # Promotion($)
-            r["promotion_pct"],  # Promotion(%)
-            r["total"],          # Total($)
-            wow,                 # WOW
-            note,                # Note
+            today,
+            i,
+            infer_knob(r["model"], r["pn"]),
+            r["model"],
+            r["pn"],
+            r["price"],
+            r["promotion"],
+            r["promotion_pct"],
+            r["total"],
+            wow,
+            note,
         ])
 
     if not values:
