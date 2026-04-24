@@ -87,9 +87,17 @@ def get_existing_valid_rows(sheet):
         if DATE_RE.match(date_val) and rank_val.isdigit():
             rows.append({
                 "sheet_row": idx,
-                "date": row[0],
-                "rank": row[1],
-                "pn": row[4],
+                "date": row[0].strip(),
+                "rank": row[1].strip(),
+                "knob": row[2].strip(),
+                "model": row[3].strip(),
+                "pn": row[4].strip(),
+                "price": row[5].strip(),
+                "promotion": row[6].strip(),
+                "promotion_pct": row[7].strip(),
+                "total": row[8].strip(),
+                "wow": row[9].strip(),
+                "note": row[10].strip(),
             })
 
     return rows
@@ -103,101 +111,41 @@ def delete_existing_today_rows(sheet, today):
         sheet.delete_rows(row_num)
 
 
-def clean_money(raw):
-    if not raw:
+def get_previous_snapshot(sheet, today):
+    existing = get_existing_valid_rows(sheet)
+    dates = sorted({r["date"] for r in existing if r["date"] != today})
+
+    if not dates:
+        return []
+
+    prev_date = dates[-1]
+    prev_rows = [r for r in existing if r["date"] == prev_date]
+    prev_rows.sort(key=lambda x: int(x["rank"]))
+    return prev_rows
+
+
+def calc_wow_value(prev_total, curr_total):
+    prev = to_float(prev_total)
+    curr = to_float(curr_total)
+
+    if prev is None or curr is None or prev == 0:
         return ""
-    raw = raw.replace(",", "").replace("$", "").strip()
-    f = to_float(raw)
-    if f is None:
+
+    return f"{((curr - prev) / prev) * 100:.2f}%"
+
+
+def build_note_value(prev_by_pn, pn, current_rank):
+    prev = prev_by_pn.get(pn)
+
+    if not prev:
         return ""
-    return f"{f:.2f}"
 
+    prev_rank = int(prev["rank"])
 
-def parse_plp_text(body_text):
-    lines = [x.strip() for x in body_text.splitlines() if x.strip()]
+    if prev_rank == current_rank:
+        return "SAME"
 
-    found = []
-    for idx, line in enumerate(lines):
-        pn = line.strip().upper()
-        if pn not in MODEL_MAP:
-            continue
-
-        model = MODEL_MAP[pn]
-
-        segment = lines[idx: idx + 30]
-        segment_text = "\n".join(segment)
-
-        prices = re.findall(r"\$([\d,]+(?:\.\d{2})?)", segment_text)
-        prices = [clean_money(p) for p in prices]
-        prices = [p for p in prices if p and to_float(p) and to_float(p) >= 100]
-
-        off_match = re.search(r"\$([\d,]+(?:\.\d{2})?)\s+OFF", segment_text, re.I)
-        promotion = clean_money(off_match.group(1)) if off_match else ""
-
-        current_price = ""
-        list_price = ""
-
-        # PLP 구조 기준:
-        # 현재가가 먼저 나오고, OFF 옆에 정상가가 뒤따름
-        if prices:
-            current_price = prices[0]
-
-        if promotion and current_price:
-            cp = to_float(current_price)
-            pp = to_float(promotion)
-            if cp is not None and pp is not None:
-                list_price = f"{cp + pp:.2f}"
-
-        if not list_price:
-            if len(prices) >= 2:
-                list_price = prices[1]
-            elif current_price:
-                list_price = current_price
-                promotion = ""
-
-        if not current_price or not list_price:
-            continue
-
-        found.append({
-            "pn": pn,
-            "model": model,
-            "price": list_price,        # 정상가
-            "promotion": promotion,     # 할인액
-            "total": current_price,     # 할인 후 가격
-        })
-
-    # 중복 제거, 화면 순서 유지
-    seen = set()
-    out = []
-    for item in found:
-        if item["pn"] in seen:
-            continue
-        seen.add(item["pn"])
-        out.append(item)
-
-    return out[:5]
-
-
-def scrape_top5():
-    with sync_playwright() as p:
-        browser = p.chromium.launch(headless=True)
-        page = browser.new_page(
-            user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
-        )
-
-        page.goto(SEARCH_URL, wait_until="domcontentloaded", timeout=120000)
-        page.wait_for_timeout(7000)
-
-        body_text = page.locator("body").inner_text(timeout=30000)
-        rows = parse_plp_text(body_text)
-
-        browser.close()
-
-    if len(rows) < 5:
-        raise RuntimeError(f"Only {len(rows)} valid LG rows parsed.")
-
-    print(f"[DEBUG] parsed rows: {rows}")
-    return rows
+    return "Ranking change"
 
 
 def write_to_list(rows):
@@ -207,14 +155,17 @@ def write_to_list(rows):
 
     delete_existing_today_rows(sheet, today)
 
-    start_row = len(sheet.get_all_values()) + 1
+    prev_rows = get_previous_snapshot(sheet, today)
+    prev_by_pn = {r["pn"]: r for r in prev_rows if r["pn"]}
 
     values = []
-    for i, r in enumerate(rows, start=1):
-        row_num = start_row + i - 1
 
-        promotion_pct_formula = f'=IFERROR(G{row_num}/F{row_num},"")'
-        total_formula = f'=IFERROR(F{row_num}-G{row_num},"")'
+    for i, r in enumerate(rows, start=1):
+        pn = r["pn"]
+        prev = prev_by_pn.get(pn, {})
+
+        wow = calc_wow_value(prev.get("total", ""), r["total"])
+        note = build_note_value(prev_by_pn, pn, i)
 
         values.append([
             today,
@@ -224,10 +175,10 @@ def write_to_list(rows):
             r["pn"],
             r["price"],
             r["promotion"],
-            promotion_pct_formula,
-            total_formula,
-            calc_wow_formula(row_num),
-            note_formula(row_num),
+            calc_promo_pct(r["price"], r["promotion"]),
+            r["total"],
+            wow,
+            note,
         ])
 
     if not values:
