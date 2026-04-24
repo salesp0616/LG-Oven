@@ -5,7 +5,7 @@ from datetime import datetime
 
 import gspread
 from google.oauth2.service_account import Credentials
-from playwright.sync_api import sync_playwright, TimeoutError as PlaywrightTimeoutError
+from playwright.sync_api import sync_playwright
 
 SHEET_ID = os.getenv("SHEET_ID")
 GOOGLE_SERVICE_ACCOUNT_JSON = os.getenv("GOOGLE_SERVICE_ACCOUNT_JSON")
@@ -26,14 +26,6 @@ MODEL_MAP = {
     "WCEP6427F": "1.7/4.7 cu. ft. Smart Combination Wall Oven with InstaView®, True Convection, Air Fry, and Steam Sous Vide",
 }
 
-def dedupe_keep_order(seq):
-    seen = set()
-    out = []
-    for x in seq:
-        if x not in seen:
-            seen.add(x)
-            out.append(x)
-    return out
 
 def to_float(value):
     try:
@@ -41,25 +33,6 @@ def to_float(value):
     except Exception:
         return None
 
-def to_money_str(value):
-    f = to_float(value)
-    if f is None:
-        return ""
-    return f"{f:.2f}"
-
-def calc_promo_pct(list_price, promo_amount):
-    lp = to_float(list_price)
-    pa = to_float(promo_amount)
-    if lp is None or pa is None or lp <= 0:
-        return ""
-    return f"{(pa / lp) * 100:.2f}%"
-
-def calc_wow(prev_total, curr_total):
-    p = to_float(prev_total)
-    c = to_float(curr_total)
-    if p is None or c is None or p == 0:
-        return ""
-    return f"{((c - p) / p) * 100:.2f}%"
 
 def infer_knob(model, pn):
     m = (model or "").lower()
@@ -77,136 +50,23 @@ def infer_knob(model, pn):
 
     return ""
 
-def extract_pn_from_url(url):
-    m = re.search(r"/lg-([a-z0-9\-]+)", url, re.I)
-    if not m:
-        return ""
-    return m.group(1).split("-")[0].upper()
 
-def extract_pdp_links(page):
-    hrefs = page.locator("a[href]").evaluate_all(
-        """els => els.map(e => e.getAttribute('href')).filter(Boolean)"""
+def calc_wow_formula(row_num):
+    return (
+        f'=IFERROR((I{row_num}-LOOKUP(2,1/(($E$5:E{row_num-1}=E{row_num})'
+        f'*($A$5:A{row_num-1}<A{row_num})),$I$5:I{row_num-1}))/'
+        f'LOOKUP(2,1/(($E$5:E{row_num-1}=E{row_num})'
+        f'*($A$5:A{row_num-1}<A{row_num})),$I$5:I{row_num-1}),"")'
     )
 
-    links = []
-    for href in hrefs:
-        if href.startswith("/us/cooking-appliances/lg-"):
-            links.append("https://www.lg.com" + href)
-        elif href.startswith("https://www.lg.com/us/cooking-appliances/lg-"):
-            links.append(href)
 
-    links = dedupe_keep_order(links)
+def note_formula(row_num):
+    return (
+        f'=IFERROR(IF(B{row_num}=LOOKUP(2,1/(($E$5:E{row_num-1}=E{row_num})'
+        f'*($A$5:A{row_num-1}<A{row_num})),$B$5:B{row_num-1}),'
+        f'"SAME","Ranking change"),"")'
+    )
 
-    filtered = []
-    for url in links:
-        pn = extract_pn_from_url(url)
-        if pn in MODEL_MAP:
-            filtered.append(url)
-
-    return filtered
-
-def extract_prices_from_text(text):
-    # 목표:
-    # Price($) = 정상가
-    # Promotion($) = 할인액
-    # Total($) = 할인 후 가격
-
-    off_match = re.search(r"\$([\d,]+(?:\.\d{2})?)\s+OFF", text, re.I)
-    promo = to_money_str(off_match.group(1)) if off_match else ""
-
-    prices = re.findall(r"\$([\d,]+(?:\.\d{2})?)", text)
-    prices = [to_money_str(p) for p in prices]
-    prices = [p for p in prices if p]
-
-    current = ""
-    list_price = ""
-
-    if promo and len(prices) >= 2:
-        # 보통 상세페이지 텍스트 구조: 현재가, 할인액, 정상가
-        candidates = [to_float(p) for p in prices if to_float(p) is not None]
-        promo_f = to_float(promo)
-
-        valid_prices = [p for p in candidates if p != promo_f and p >= 100]
-        if len(valid_prices) >= 2:
-            current = to_money_str(min(valid_prices))
-            list_price = to_money_str(max(valid_prices))
-        elif len(valid_prices) == 1:
-            current = to_money_str(valid_prices[0])
-            list_price = to_money_str(valid_prices[0] + promo_f)
-    else:
-        valid_prices = [to_float(p) for p in prices if to_float(p) is not None and to_float(p) >= 100]
-        if valid_prices:
-            current = to_money_str(valid_prices[0])
-            list_price = current
-            promo = ""
-
-    if not current or not list_price:
-        return None
-
-    return {
-        "price": list_price,
-        "promotion": promo,
-        "promotion_pct": calc_promo_pct(list_price, promo),
-        "total": current,
-    }
-
-def parse_product_page(page, url):
-    pn = extract_pn_from_url(url)
-    if pn not in MODEL_MAP:
-        return None
-
-    try:
-        page.goto(url, wait_until="domcontentloaded", timeout=120000)
-        page.wait_for_timeout(2500)
-        body_text = page.locator("body").inner_text(timeout=30000)
-    except PlaywrightTimeoutError:
-        return None
-    except Exception:
-        return None
-
-    price_data = extract_prices_from_text(body_text)
-    if not price_data:
-        return None
-
-    return {
-        "url": url,
-        "pn": pn,
-        "model": MODEL_MAP[pn],
-        "price": price_data["price"],
-        "promotion": price_data["promotion"],
-        "promotion_pct": price_data["promotion_pct"],
-        "total": price_data["total"],
-    }
-
-def scrape_top5():
-    with sync_playwright() as p:
-        browser = p.chromium.launch(headless=True)
-        page = browser.new_page(
-            user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
-        )
-
-        page.goto(SEARCH_URL, wait_until="domcontentloaded", timeout=120000)
-        page.wait_for_timeout(5000)
-
-        links = extract_pdp_links(page)
-        print(f"[DEBUG] filtered PDP links found: {len(links)}")
-        print(f"[DEBUG] links: {links}")
-
-        results = []
-        for url in links:
-            item = parse_product_page(page, url)
-            if item:
-                results.append(item)
-            if len(results) >= 5:
-                break
-
-        browser.close()
-
-    if len(results) < 5:
-        raise RuntimeError(f"Only {len(results)} valid LG rows parsed.")
-
-    print(f"[DEBUG] parsed rows: {results}")
-    return results
 
 def get_client():
     creds = Credentials.from_service_account_info(
@@ -214,6 +74,7 @@ def get_client():
         scopes=SCOPES,
     )
     return gspread.authorize(creds)
+
 
 def get_existing_valid_rows(sheet):
     all_values = sheet.get_all_values()
@@ -231,43 +92,116 @@ def get_existing_valid_rows(sheet):
                 "sheet_row": idx,
                 "date": row[0],
                 "rank": row[1],
-                "knob": row[2],
-                "model": row[3],
                 "pn": row[4],
-                "price": row[5],
-                "promotion": row[6],
-                "promotion_pct": row[7],
-                "total": row[8],
-                "wow": row[9],
-                "note": row[10],
             })
 
     return rows
 
+
 def delete_existing_today_rows(sheet, today):
     existing = get_existing_valid_rows(sheet)
     target_rows = [r["sheet_row"] for r in existing if r["date"] == today]
+
     for row_num in sorted(target_rows, reverse=True):
         sheet.delete_rows(row_num)
 
-def get_previous_snapshot(sheet, today):
-    existing = get_existing_valid_rows(sheet)
-    dates = sorted({r["date"] for r in existing if r["date"] != today})
-    if not dates:
-        return []
-    prev_date = dates[-1]
-    prev_rows = [r for r in existing if r["date"] == prev_date]
-    prev_rows.sort(key=lambda x: int(x["rank"]))
-    return prev_rows
 
-def build_note(prev_by_pn, pn, current_rank):
-    prev = prev_by_pn.get(pn)
-    if not prev:
+def clean_money(raw):
+    if not raw:
         return ""
-    prev_rank = int(prev["rank"])
-    if prev_rank == current_rank:
-        return "SAME"
-    return "Ranking change"
+    raw = raw.replace(",", "").replace("$", "").strip()
+    f = to_float(raw)
+    if f is None:
+        return ""
+    return f"{f:.2f}"
+
+
+def parse_plp_text(body_text):
+    lines = [x.strip() for x in body_text.splitlines() if x.strip()]
+
+    found = []
+    for idx, line in enumerate(lines):
+        pn = line.strip().upper()
+        if pn not in MODEL_MAP:
+            continue
+
+        model = MODEL_MAP[pn]
+
+        segment = lines[idx: idx + 30]
+        segment_text = "\n".join(segment)
+
+        prices = re.findall(r"\$([\d,]+(?:\.\d{2})?)", segment_text)
+        prices = [clean_money(p) for p in prices]
+        prices = [p for p in prices if p and to_float(p) and to_float(p) >= 100]
+
+        off_match = re.search(r"\$([\d,]+(?:\.\d{2})?)\s+OFF", segment_text, re.I)
+        promotion = clean_money(off_match.group(1)) if off_match else ""
+
+        current_price = ""
+        list_price = ""
+
+        # PLP 구조 기준:
+        # 현재가가 먼저 나오고, OFF 옆에 정상가가 뒤따름
+        if prices:
+            current_price = prices[0]
+
+        if promotion and current_price:
+            cp = to_float(current_price)
+            pp = to_float(promotion)
+            if cp is not None and pp is not None:
+                list_price = f"{cp + pp:.2f}"
+
+        if not list_price:
+            if len(prices) >= 2:
+                list_price = prices[1]
+            elif current_price:
+                list_price = current_price
+                promotion = ""
+
+        if not current_price or not list_price:
+            continue
+
+        found.append({
+            "pn": pn,
+            "model": model,
+            "price": list_price,        # 정상가
+            "promotion": promotion,     # 할인액
+            "total": current_price,     # 할인 후 가격
+        })
+
+    # 중복 제거, 화면 순서 유지
+    seen = set()
+    out = []
+    for item in found:
+        if item["pn"] in seen:
+            continue
+        seen.add(item["pn"])
+        out.append(item)
+
+    return out[:5]
+
+
+def scrape_top5():
+    with sync_playwright() as p:
+        browser = p.chromium.launch(headless=True)
+        page = browser.new_page(
+            user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
+        )
+
+        page.goto(SEARCH_URL, wait_until="domcontentloaded", timeout=120000)
+        page.wait_for_timeout(7000)
+
+        body_text = page.locator("body").inner_text(timeout=30000)
+        rows = parse_plp_text(body_text)
+
+        browser.close()
+
+    if len(rows) < 5:
+        raise RuntimeError(f"Only {len(rows)} valid LG rows parsed.")
+
+    print(f"[DEBUG] parsed rows: {rows}")
+    return rows
+
 
 def write_to_list(rows):
     client = get_client()
@@ -276,14 +210,14 @@ def write_to_list(rows):
 
     delete_existing_today_rows(sheet, today)
 
-    prev_rows = get_previous_snapshot(sheet, today)
-    prev_by_pn = {r["pn"]: r for r in prev_rows if r["pn"]}
+    start_row = len(sheet.get_all_values()) + 1
 
     values = []
     for i, r in enumerate(rows, start=1):
-        prev = prev_by_pn.get(r["pn"], {})
-        wow = calc_wow(prev.get("total", ""), r["total"])
-        note = build_note(prev_by_pn, r["pn"], i)
+        row_num = start_row + i - 1
+
+        promotion_pct_formula = f'=IFERROR(G{row_num}/F{row_num},"")'
+        total_formula = f'=IFERROR(F{row_num}-G{row_num},"")'
 
         values.append([
             today,
@@ -293,10 +227,10 @@ def write_to_list(rows):
             r["pn"],
             r["price"],
             r["promotion"],
-            r["promotion_pct"],
-            r["total"],
-            wow,
-            note,
+            promotion_pct_formula,
+            total_formula,
+            calc_wow_formula(row_num),
+            note_formula(row_num),
         ])
 
     if not values:
@@ -305,9 +239,11 @@ def write_to_list(rows):
     sheet.append_rows(values, value_input_option="USER_ENTERED")
     print("[SUCCESS] rows appended to List")
 
+
 def main():
     rows = scrape_top5()
     write_to_list(rows)
+
 
 if __name__ == "__main__":
     main()
