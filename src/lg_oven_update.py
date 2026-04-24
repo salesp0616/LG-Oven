@@ -53,14 +53,14 @@ def infer_knob(model, pn):
 
 def calc_wow_formula(row_num):
     return (
-        f'=IFERROR((I{row_num}-LOOKUP(2,1/($E$5:E{row_num-1}=E{row_num}),$I$5:I{row_num-1}))/'
-        f'LOOKUP(2,1/($E$5:E{row_num-1}=E{row_num}),$I$5:I{row_num-1}),"")'
+        f'=IFERROR((I{row_num}-LOOKUP(2,1/(TRIM(TO_TEXT($E$5:E{row_num-1}))=TRIM(TO_TEXT(E{row_num}))),$I$5:I{row_num-1}))/'
+        f'LOOKUP(2,1/(TRIM(TO_TEXT($E$5:E{row_num-1}))=TRIM(TO_TEXT(E{row_num}))),$I$5:I{row_num-1}),"")'
     )
 
 
 def note_formula(row_num):
     return (
-        f'=IFERROR(IF(B{row_num}=LOOKUP(2,1/($E$5:E{row_num-1}=E{row_num}),$B$5:B{row_num-1}),'
+        f'=IFERROR(IF(B{row_num}=LOOKUP(2,1/(TRIM(TO_TEXT($E$5:E{row_num-1}))=TRIM(TO_TEXT(E{row_num}))),$B$5:B{row_num-1}),'
         f'"SAME","Ranking change"),"")'
     )
 
