@@ -19,9 +19,10 @@ SCOPES = [
 DATE_RE = re.compile(r"^\d{4}\.\d{2}\.\d{2}$")
 
 MODEL_MAP = {
-    "LDGL6924S": "6.9 cu. ft. Smart Gas Double Oven Freestanding Range with ProBake Convection®, Air Fry & Air Sous Vide",
+    "LSGL5831F": "5.8 cu. ft. Gas Single Oven Slide-in Range, EasyClean® plus Self Clean, ThinQ®, PrintProof™ Stainless Steel",
     "WSEP4723F": "4.7 cu. ft. Smart Wall Oven with Convection and Air Fry",
     "LSEL6330SE": "6.3 cu. ft. Electric Slide-in Range",
+    "LDGL6924S": "6.9 cu. ft. Smart Gas Double Oven Freestanding Range with ProBake Convection®, Air Fry & Air Sous Vide",
     "LREN6323YE": "6.3 cu. ft. Smart Wi-Fi Enabled ProBake Convection® Electric Range with Air Fry & EasyClean®",
     "WCEP6427F": "1.7/4.7 cu. ft. Smart Combination Wall Oven with InstaView®, True Convection, Air Fry, and Steam Sous Vide",
 }
@@ -61,7 +62,7 @@ def infer_knob(model, pn):
 
     if p.startswith(("WSEP", "WCEP", "WDEP", "WCES", "WDES")):
         return "X"
-    if p.startswith(("LDG", "LRE", "LSE", "LTE", "LSEL", "LRGL", "LREL")):
+    if p.startswith(("LDG", "LRE", "LSE", "LTE", "LSEL", "LRGL", "LREL", "LSGL")):
         return "O"
 
     return ""
@@ -174,6 +175,7 @@ def parse_plp_text(body_text):
                 promotion = ""
 
         if not current_price or not list_price:
+            print(f"[DEBUG] skipped {pn}: current_price={current_price}, list_price={list_price}")
             continue
 
         found.append({
@@ -194,6 +196,7 @@ def parse_plp_text(body_text):
         seen.add(item["pn"])
         out.append(item)
 
+    print(f"[DEBUG] parsed PLP rows: {out}")
     return out[:5]
 
 def scrape_lg():
@@ -205,6 +208,10 @@ def scrape_lg():
 
         page.goto(SEARCH_URL, wait_until="domcontentloaded", timeout=120000)
         page.wait_for_timeout(7000)
+
+        for _ in range(3):
+            page.mouse.wheel(0, 3000)
+            page.wait_for_timeout(1000)
 
         body_text = page.locator("body").inner_text(timeout=30000)
         rows = parse_plp_text(body_text)
